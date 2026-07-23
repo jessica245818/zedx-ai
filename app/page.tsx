@@ -3,7 +3,7 @@
 import { ChangeEvent, useMemo, useState } from "react";
 import {
   Activity, AlertTriangle, Check, ChevronDown, CircleCheck, Download, FileUp,
-  Filter, Mail, Play, Search, Send, ShieldCheck, Sparkles, X,
+  Filter, Mail, Play, Search, Send, ShieldCheck, Sparkles,
 } from "lucide-react";
 
 type Decision = "selected" | "review" | "blocked";
@@ -11,7 +11,7 @@ type Approval = "pending" | "approved" | "rejected";
 type Contact = {
   id: string; email: string; domain: string; probability: number;
   decision: Decision; reason: string; approval: Approval;
-  sendStatus: "not_sent" | "test_sent";
+  sendStatus: "not_sent" | "test_sent" | "ready";
 };
 
 const initialContacts: Contact[] = [];
@@ -39,7 +39,8 @@ export default function Home() {
   const PAGE_SIZE = 50;
   const [contacts, setContacts] = useState(initialContacts);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | Decision>("all");
+  const [filter, setFilter] = useState<"all" | Decision>("selected");
+  const [autoSend, setAutoSend] = useState(true);
   const [selectedId, setSelectedId] = useState("");
   const [subject, setSubject] = useState("A quick introduction");
   const [body, setBody] = useState("Hello,\n\nI’m reaching out because your role appears relevant to a potential partnership.\n\n[Add a truthful, specific value proposition here.]\n\nIf this is not relevant, reply “no” and we will not contact you again.\n\nBest,\n[Your name]");
@@ -60,10 +61,6 @@ export default function Home() {
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   const displayed = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const active = contacts.find((contact) => contact.id === selectedId) ?? contacts[0];
-  const approvedCount = useMemo(
-    () => contacts.filter((contact) => contact.approval === "approved").length,
-    [contacts],
-  );
   const totals = useMemo(() => ({
     scanned: contacts.length,
     selected: contacts.filter((contact) => contact.decision === "selected").length,
@@ -73,10 +70,6 @@ export default function Home() {
 
   const notify = (message: string, duration = 2700) => {
     setToast(message); window.setTimeout(() => setToast(""), duration);
-  };
-  const updateApproval = (id: string, approval: Approval) => {
-    setContacts((current) => current.map((contact) => contact.id === id ? { ...contact, approval } : contact));
-    notify(approval === "approved" ? "Contact approved for drafting" : "Contact removed from this campaign");
   };
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -232,12 +225,17 @@ export default function Home() {
       const scored = directContacts.length
         ? directContacts
         : [...extractedEmails].map(scoreEmail).filter((item): item is Contact => Boolean(item));
+      const deliveryQueue = scored.map((contact) => (
+        autoSend && contact.decision === "selected"
+          ? { ...contact, sendStatus: "ready" as const }
+          : contact
+      ));
       setImportProgress(100);
-      setContacts(scored);
-      setSelectedId(scored[0]?.id ?? "");
+      setContacts(deliveryQueue);
+      setSelectedId(deliveryQueue.find((contact) => contact.decision === "selected")?.id ?? deliveryQueue[0]?.id ?? "");
       setPage(1);
       setImportStage("Rendering the first 50 contacts…");
-      notify(`${scored.length} unique emails imported and scored`);
+      notify(`${deliveryQueue.filter((contact) => contact.decision === "selected").length} recipients selected automatically`);
     } catch (error) {
       notify(`Import failed: ${error instanceof Error ? error.message : "The file could not be read."}`, 6000);
     } finally {
@@ -253,9 +251,9 @@ export default function Home() {
   return (
     <main>
       <header className="topbar">
-        <div className="brand"><span className="brandmark"><Mail size={19} /></span><span>ReachPilot</span></div>
+        <div className="brand"><span className="brandmark"><Mail size={19} /></span><span>ZedX AI</span></div>
         <div className="top-actions">
-          <span className="safe-badge"><ShieldCheck size={15} /> Safe test mode</span>
+          <label className="auto-toggle"><input type="checkbox" checked={autoSend} onChange={(event) => setAutoSend(event.target.checked)} /><span /><b>Automatic sending</b></label>
           <a className="test-download" href="/test-emails.csv" download><Download size={16} /> Test CSV</a>
           <label className="upload-button"><FileUp size={17} /> {uploading ? `Reading ${importProgress}%` : "Import CSV / Excel"}<input data-testid="file-upload" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} /></label>
           <button className="avatar" aria-label="User menu">JG</button>
@@ -265,8 +263,8 @@ export default function Home() {
       <section className="hero">
         <div>
           <p className="eyebrow"><Sparkles size={14} /> Your local outreach workspace</p>
-          <h1>Decide who deserves<br />a thoughtful email.</h1>
-          <p className="hero-copy">Review the selector’s recommendations, approve the right contacts, and test your message before anything goes out.</p>
+          <h1>Upload. Decide.<br />Send automatically.</h1>
+          <p className="hero-copy">ZedX AI extracts every email, scores it, chooses send or skip, and builds the recipient list without per-contact approval.</p>
         </div>
         <div className="pipeline-card">
           <div className="pipeline-head"><span>Pipeline health</span><strong><span className="live-dot" /> Ready</strong></div>
@@ -279,13 +277,13 @@ export default function Home() {
       <section className="metrics" aria-label="Pipeline totals">
         <Metric label="Emails loaded" value={totals.scanned} note="from your file" tone="neutral" />
         <Metric label="Model selected" value={totals.selected} note={totals.scanned ? `${((totals.selected / totals.scanned) * 100).toFixed(1)}% of file` : "waiting for import"} tone="green" />
-        <Metric label="Needs review" value={totals.review} note="human decision" tone="amber" />
+        <Metric label="Skipped" value={totals.review + totals.blocked} note="not selected to send" tone="amber" />
         <Metric label="Safety blocked" value={totals.blocked} note="never eligible" tone="red" />
       </section>
 
       <section className="workspace">
         <div className="queue-panel">
-          <div className="section-title"><div><p className="eyebrow">Current batch</p><h2>Contact queue</h2></div><span className="count-pill">{visible.length.toLocaleString()} matches</span></div>
+          <div className="section-title"><div><p className="eyebrow">Current batch</p><h2>Delivery recipients</h2></div><span className="count-pill">{visible.length.toLocaleString()} matches</span></div>
           <div className="toolbar">
             <label className="search"><Search size={17} /><input aria-label="Search contacts" placeholder="Search email or domain" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} /></label>
             <label className="filter"><Filter size={16} /><select aria-label="Filter decisions" value={filter} onChange={(e) => { setFilter(e.target.value as typeof filter); setPage(1); }}><option value="all">All decisions</option><option value="selected">Selected</option><option value="review">Review</option><option value="blocked">Blocked</option></select><ChevronDown size={14} /></label>
@@ -293,15 +291,14 @@ export default function Home() {
           {uploading && <div className="import-status" role="status"><span><Activity size={15} /> {importStage}</span><strong>{importProgress}%</strong><i><em style={{ width: `${importProgress}%` }} /></i></div>}
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Contact</th><th>Score</th><th>Decision</th><th>Approval</th><th /></tr></thead>
+              <thead><tr><th>Contact</th><th>Score</th><th>Decision</th><th>Delivery</th></tr></thead>
               <tbody>{displayed.map((contact) => (
                 <tr key={contact.id} className={contact.id === selectedId ? "active-row" : ""} onClick={() => setSelectedId(contact.id)}>
                   <td><strong>{contact.email}</strong><span>{contact.domain}</span></td>
                   <td><div className="score-cell"><span>{Math.round(contact.probability * 100)}%</span><i><em style={{ width: `${contact.probability * 100}%` }} /></i></div></td>
-                  <td><DecisionBadge decision={contact.decision} /></td><td><ApprovalBadge approval={contact.approval} /></td>
-                  <td className="row-actions">{contact.decision !== "blocked" && <><button aria-label={`Approve ${contact.email}`} onClick={(e) => { e.stopPropagation(); updateApproval(contact.id, "approved"); }}><Check size={16} /></button><button aria-label={`Reject ${contact.email}`} onClick={(e) => { e.stopPropagation(); updateApproval(contact.id, "rejected"); }}><X size={16} /></button></>}</td>
+                  <td><DecisionBadge decision={contact.decision} /></td><td><span className={`delivery delivery-${contact.sendStatus}`}>{contact.sendStatus === "ready" ? "Ready to send" : contact.sendStatus === "test_sent" ? "Test sent" : "Skipped"}</span></td>
                 </tr>
-              ))}{!visible.length && <tr><td colSpan={5} className="empty-row"><FileUp size={22} /><strong>Import your CSV or Excel file to begin</strong><span>No contacts are built into this app.</span></td></tr>}</tbody>
+              ))}{!visible.length && <tr><td colSpan={4} className="empty-row"><FileUp size={22} /><strong>Import your CSV or Excel file to begin</strong><span>No contacts are built into this app.</span></td></tr>}</tbody>
             </table>
           </div>
           {visible.length > PAGE_SIZE && <div className="pagination"><span>{((page - 1) * PAGE_SIZE + 1).toLocaleString()}–{Math.min(page * PAGE_SIZE, visible.length).toLocaleString()} of {visible.length.toLocaleString()}</span><div><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><button disabled={page === pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next</button></div></div>}
@@ -317,7 +314,7 @@ export default function Home() {
             <input aria-label="Test inbox" placeholder="your-test-inbox@example.com" value={testAddress} onChange={(e) => setTestAddress(e.target.value)} />
             <button data-testid="test-send" onClick={sendTest}><Send size={17} /> Run test send</button>
           </div>
-          <div className="approval-summary"><CircleCheck size={17} /><span><strong>{approvedCount} approved</strong><small>Live delivery remains locked</small></span></div>
+          <div className="approval-summary"><CircleCheck size={17} /><span><strong>Automatic decisions enabled</strong><small>Connect a verified email provider for live delivery</small></span></div>
         </aside>
       </section>
       <footer><span><Activity size={15} /> Local model workflow · no OpenAI API connection</span><span>No external messages are sent in test mode.</span></footer>
@@ -331,7 +328,4 @@ function Metric({ label, value, note, tone }: { label: string; value: number; no
 }
 function DecisionBadge({ decision }: { decision: Decision }) {
   return <span className={`badge decision-${decision}`}>{decision === "selected" ? <Check size={13} /> : decision === "blocked" ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />}{decision}</span>;
-}
-function ApprovalBadge({ approval }: { approval: Approval }) {
-  return <span className={`approval approval-${approval}`}>{approval}</span>;
 }
