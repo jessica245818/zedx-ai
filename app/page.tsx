@@ -15,14 +15,14 @@ type Contact = {
 };
 
 const initialContacts: Contact[] = [
-  ["b0b3aa9700d8e612", "business.development@getg5.com", "getg5.com", 1, "selected"],
-  ["b531483daa75c296", "business.development@nocomi.media", "nocomi.media", 1, "selected"],
-  ["3085b4e6a4af2778", "business.development@spazio38.com", "spazio38.com", 1, "selected"],
-  ["3302dffdb6ef1748", "business.development@eztable.com", "eztable.com", 1, "selected"],
-  ["0bd9ae5503ab501d", "business.development@orau.org", "orau.org", 1, "selected"],
-  ["52812f76ac7216d1", "dldwdworkforcedevelopment-labor@maryland.gov", "maryland.gov", .999995, "review"],
-  ["ad0ea886bc8218ee", "securitiesgeneral.questions@com.state.oh.us", "com.state.oh.us", .999995, "review"],
-  ["a5624c63c52a1c9a", "ndscs.businessaffairsoffice@ndscs.edu", "ndscs.edu", .999994, "review"],
+  ["demo-01", "partnerships@northstar.example", "northstar.example", .98, "selected"],
+  ["demo-02", "founder@brightworks.example", "brightworks.example", .97, "selected"],
+  ["demo-03", "growth@fieldstone.example", "fieldstone.example", .94, "selected"],
+  ["demo-04", "marketing@atlaslab.example", "atlaslab.example", .93, "selected"],
+  ["demo-05", "director@harborco.example", "harborco.example", .91, "selected"],
+  ["demo-06", "office@redwood.example", "redwood.example", .68, "review"],
+  ["demo-07", "hello@sunroom.example", "sunroom.example", .61, "review"],
+  ["demo-08", "contact@orbital.example", "orbital.example", .58, "review"],
 ].map(([id, email, domain, probability, decision]) => ({
   id: String(id), email: String(email), domain: String(domain),
   probability: Number(probability), decision: decision as Decision,
@@ -116,13 +116,13 @@ export default function Home() {
 
       <section className="hero">
         <div>
-          <p className="eyebrow"><Sparkles size={14} /> AI outreach workspace</p>
+          <p className="eyebrow"><Sparkles size={14} /> Your local outreach workspace</p>
           <h1>Decide who deserves<br />a thoughtful email.</h1>
           <p className="hero-copy">Review the selector’s recommendations, approve the right contacts, and test your message before anything goes out.</p>
         </div>
         <div className="pipeline-card">
           <div className="pipeline-head"><span>Pipeline health</span><strong><span className="live-dot" /> Ready</strong></div>
-          <div className="pipeline-row"><span>Model</span><b>email-selector-v1</b></div>
+          <div className="pipeline-row"><span>Model</span><b>local email-selector-v1</b></div>
           <div className="pipeline-row"><span>Selection threshold</span><b>0.80</b></div>
           <div className="pipeline-row"><span>Domain limit</span><b>1 contact</b></div>
           <div className="pipeline-note"><AlertTriangle size={16} /> Weak-label model — human approval required.</div>
@@ -171,7 +171,7 @@ export default function Home() {
           <div className="approval-summary"><CircleCheck size={17} /><span><strong>{approvedCount} approved</strong><small>Live delivery remains locked</small></span></div>
         </aside>
       </section>
-      <footer><span><Activity size={15} /> Connected to the 323,030-contact pipeline snapshot</span><span>No external messages are sent in test mode.</span></footer>
+      <footer><span><Activity size={15} /> Local model workflow · no OpenAI API connection</span><span>No external messages are sent in test mode.</span></footer>
       {toast && <div className="toast" role="status"><CircleCheck size={18} /> {toast}</div>}
     </main>
   );
