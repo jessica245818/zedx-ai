@@ -46,6 +46,7 @@ export default function Home() {
   const [testAddress, setTestAddress] = useState("");
   const [toast, setToast] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
   const [page, setPage] = useState(1);
 
   const visible = useMemo(() => {
@@ -58,7 +59,10 @@ export default function Home() {
   const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   const displayed = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const active = contacts.find((contact) => contact.id === selectedId) ?? contacts[0];
-  const approvedCount = contacts.filter((contact) => contact.approval === "approved").length;
+  const approvedCount = useMemo(
+    () => contacts.filter((contact) => contact.approval === "approved").length,
+    [contacts],
+  );
   const totals = useMemo(() => ({
     scanned: contacts.length,
     selected: contacts.filter((contact) => contact.decision === "selected").length,
@@ -77,52 +81,68 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
     setUploading(true);
+    setImportProgress(0);
     try {
-      let rows: Record<string, unknown>[];
+      const directContacts: Contact[] = [];
+      const extractedEmails = new Set<string>();
+      const addRows = (rows: Record<string, unknown>[]) => {
+        for (const row of rows) {
+          const rawEmail = row.email ?? row.contact_value;
+          if (rawEmail) {
+            const base = scoreEmail(String(rawEmail));
+            if (!base) continue;
+            const rawDecision = String(row.decision ?? "").toLowerCase();
+            const decision: Decision = ["selected", "review", "blocked"].includes(rawDecision)
+              ? rawDecision as Decision : base.decision;
+            const rawProbability = Number(row.selection_probability);
+            directContacts.push({
+              ...base,
+              id: String(row.email_id || base.id),
+              probability: Number.isFinite(rawProbability) ? rawProbability : base.probability,
+              decision,
+              reason: String(row.decision_reason || base.reason),
+              approval: ["pending", "approved", "rejected"].includes(String(row.approval_status).toLowerCase())
+                ? String(row.approval_status).toLowerCase() as Approval : "pending",
+            });
+            continue;
+          }
+          for (const value of Object.values(row)) {
+            const matches = String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+            for (const email of matches) extractedEmails.add(email.toLowerCase());
+          }
+        }
+      };
+
       if (file.name.toLowerCase().endsWith(".csv")) {
         const Papa = (await import("papaparse")).default;
-        rows = await new Promise((resolve, reject) => {
+        await new Promise<void>((resolve, reject) => {
+          let lastReported = 0;
           Papa.parse<Record<string, unknown>>(file, {
             header: true,
             worker: true,
             skipEmptyLines: true,
-            complete: (result) => resolve(result.data),
+            chunkSize: 8 * 1024 * 1024,
+            chunk: (result) => {
+              addRows(result.data);
+              const progress = Math.min(99, Math.round(((result.meta.cursor ?? 0) / file.size) * 100));
+              if (progress - lastReported >= 5) {
+                lastReported = progress;
+                setImportProgress(progress);
+              }
+            },
+            complete: () => resolve(),
             error: reject,
           });
         });
       } else {
         const XLSX = await import("xlsx");
         const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
-        rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
+        addRows(XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" }));
       }
-      const queueRows = rows.map((row) => {
-        const rawEmail = row.email ?? row.contact_value;
-        if (!rawEmail) return null;
-        const base = scoreEmail(String(rawEmail));
-        if (!base) return null;
-        const rawDecision = String(row.decision ?? "").toLowerCase();
-        const decision: Decision = ["selected", "review", "blocked"].includes(rawDecision)
-          ? rawDecision as Decision : base.decision;
-        const rawProbability = Number(row.selection_probability);
-        return {
-          ...base,
-          id: String(row.email_id || base.id),
-          probability: Number.isFinite(rawProbability) ? rawProbability : base.probability,
-          decision,
-          reason: String(row.decision_reason || base.reason),
-          approval: ["pending", "approved", "rejected"].includes(String(row.approval_status).toLowerCase())
-            ? String(row.approval_status).toLowerCase() as Approval : "pending",
-        };
-      }).filter((item): item is Contact => Boolean(item));
-
-      let scored = queueRows;
-      if (!scored.length) {
-        const found = new Set<string>();
-        rows.forEach((row) => Object.values(row).forEach((value) => {
-          (String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []).forEach((email) => found.add(email.toLowerCase()));
-        }));
-        scored = [...found].map(scoreEmail).filter((item): item is Contact => Boolean(item));
-      }
+      const scored = directContacts.length
+        ? directContacts
+        : [...extractedEmails].map(scoreEmail).filter((item): item is Contact => Boolean(item));
+      setImportProgress(100);
       setContacts(scored);
       setSelectedId(scored[0]?.id ?? "");
       setPage(1);
@@ -130,7 +150,7 @@ export default function Home() {
     } catch {
       notify("That file could not be read. Try CSV or XLSX.");
     } finally {
-      setUploading(false); event.target.value = "";
+      setUploading(false); setImportProgress(0); event.target.value = "";
     }
   };
   const sendTest = () => {
@@ -146,7 +166,7 @@ export default function Home() {
         <div className="top-actions">
           <span className="safe-badge"><ShieldCheck size={15} /> Safe test mode</span>
           <a className="test-download" href="/test-emails.csv" download><Download size={16} /> Test CSV</a>
-          <label className="upload-button"><FileUp size={17} /> {uploading ? "Reading…" : "Import CSV / Excel"}<input data-testid="file-upload" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} /></label>
+          <label className="upload-button"><FileUp size={17} /> {uploading ? `Reading ${importProgress}%` : "Import CSV / Excel"}<input data-testid="file-upload" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} /></label>
           <button className="avatar" aria-label="User menu">JG</button>
         </div>
       </header>
