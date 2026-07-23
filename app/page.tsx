@@ -2,7 +2,7 @@
 
 import { ChangeEvent, useMemo, useState } from "react";
 import {
-  Activity, AlertTriangle, Check, ChevronDown, CircleCheck, FileUp,
+  Activity, AlertTriangle, Check, ChevronDown, CircleCheck, Download, FileUp,
   Filter, Mail, Play, Search, Send, ShieldCheck, Sparkles, X,
 } from "lucide-react";
 
@@ -36,6 +36,7 @@ function scoreEmail(email: string): Contact | null {
 }
 
 export default function Home() {
+  const PAGE_SIZE = 50;
   const [contacts, setContacts] = useState(initialContacts);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | Decision>("all");
@@ -45,19 +46,25 @@ export default function Home() {
   const [testAddress, setTestAddress] = useState("");
   const [toast, setToast] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [page, setPage] = useState(1);
 
-  const visible = useMemo(() => contacts.filter((contact) => {
+  const visible = useMemo(() => {
+    if (!query && filter === "all") return contacts;
+    return contacts.filter((contact) => {
     const matchesQuery = contact.email.includes(query.toLowerCase()) || contact.domain.includes(query.toLowerCase());
     return matchesQuery && (filter === "all" || contact.decision === filter);
-  }), [contacts, query, filter]);
+    });
+  }, [contacts, query, filter]);
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  const displayed = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const active = contacts.find((contact) => contact.id === selectedId) ?? contacts[0];
   const approvedCount = contacts.filter((contact) => contact.approval === "approved").length;
-  const totals = {
+  const totals = useMemo(() => ({
     scanned: contacts.length,
     selected: contacts.filter((contact) => contact.decision === "selected").length,
     review: contacts.filter((contact) => contact.decision === "review").length,
     blocked: contacts.filter((contact) => contact.decision === "blocked").length,
-  };
+  }), [contacts]);
 
   const notify = (message: string, duration = 2700) => {
     setToast(message); window.setTimeout(() => setToast(""), duration);
@@ -71,9 +78,23 @@ export default function Home() {
     if (!file) return;
     setUploading(true);
     try {
-      const XLSX = await import("xlsx");
-      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
+      let rows: Record<string, unknown>[];
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        const Papa = (await import("papaparse")).default;
+        rows = await new Promise((resolve, reject) => {
+          Papa.parse<Record<string, unknown>>(file, {
+            header: true,
+            worker: true,
+            skipEmptyLines: true,
+            complete: (result) => resolve(result.data),
+            error: reject,
+          });
+        });
+      } else {
+        const XLSX = await import("xlsx");
+        const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+        rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
+      }
       const queueRows = rows.map((row) => {
         const rawEmail = row.email ?? row.contact_value;
         if (!rawEmail) return null;
@@ -104,6 +125,7 @@ export default function Home() {
       }
       setContacts(scored);
       setSelectedId(scored[0]?.id ?? "");
+      setPage(1);
       notify(`${scored.length} unique emails imported and scored`);
     } catch {
       notify("That file could not be read. Try CSV or XLSX.");
@@ -123,6 +145,7 @@ export default function Home() {
         <div className="brand"><span className="brandmark"><Mail size={19} /></span><span>ReachPilot</span></div>
         <div className="top-actions">
           <span className="safe-badge"><ShieldCheck size={15} /> Safe test mode</span>
+          <a className="test-download" href="/test-emails.csv" download><Download size={16} /> Test CSV</a>
           <label className="upload-button"><FileUp size={17} /> {uploading ? "Reading…" : "Import CSV / Excel"}<input data-testid="file-upload" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} /></label>
           <button className="avatar" aria-label="User menu">JG</button>
         </div>
@@ -152,15 +175,15 @@ export default function Home() {
 
       <section className="workspace">
         <div className="queue-panel">
-          <div className="section-title"><div><p className="eyebrow">Current batch</p><h2>Contact queue</h2></div><span className="count-pill">{visible.length} shown</span></div>
+          <div className="section-title"><div><p className="eyebrow">Current batch</p><h2>Contact queue</h2></div><span className="count-pill">{visible.length.toLocaleString()} matches</span></div>
           <div className="toolbar">
-            <label className="search"><Search size={17} /><input aria-label="Search contacts" placeholder="Search email or domain" value={query} onChange={(e) => setQuery(e.target.value)} /></label>
-            <label className="filter"><Filter size={16} /><select aria-label="Filter decisions" value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)}><option value="all">All decisions</option><option value="selected">Selected</option><option value="review">Review</option><option value="blocked">Blocked</option></select><ChevronDown size={14} /></label>
+            <label className="search"><Search size={17} /><input aria-label="Search contacts" placeholder="Search email or domain" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} /></label>
+            <label className="filter"><Filter size={16} /><select aria-label="Filter decisions" value={filter} onChange={(e) => { setFilter(e.target.value as typeof filter); setPage(1); }}><option value="all">All decisions</option><option value="selected">Selected</option><option value="review">Review</option><option value="blocked">Blocked</option></select><ChevronDown size={14} /></label>
           </div>
           <div className="table-wrap">
             <table>
               <thead><tr><th>Contact</th><th>Score</th><th>Decision</th><th>Approval</th><th /></tr></thead>
-              <tbody>{visible.map((contact) => (
+              <tbody>{displayed.map((contact) => (
                 <tr key={contact.id} className={contact.id === selectedId ? "active-row" : ""} onClick={() => setSelectedId(contact.id)}>
                   <td><strong>{contact.email}</strong><span>{contact.domain}</span></td>
                   <td><div className="score-cell"><span>{Math.round(contact.probability * 100)}%</span><i><em style={{ width: `${contact.probability * 100}%` }} /></i></div></td>
@@ -170,6 +193,7 @@ export default function Home() {
               ))}{!visible.length && <tr><td colSpan={5} className="empty-row"><FileUp size={22} /><strong>Import your CSV or Excel file to begin</strong><span>No contacts are built into this app.</span></td></tr>}</tbody>
             </table>
           </div>
+          {visible.length > PAGE_SIZE && <div className="pagination"><span>{((page - 1) * PAGE_SIZE + 1).toLocaleString()}–{Math.min(page * PAGE_SIZE, visible.length).toLocaleString()} of {visible.length.toLocaleString()}</span><div><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><button disabled={page === pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next</button></div></div>}
         </div>
 
         <aside className="composer">
