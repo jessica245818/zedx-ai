@@ -91,12 +91,30 @@ export default function Home() {
         for (const row of rows) {
           const rawEmail = row.email ?? row.contact_value;
           if (rawEmail) {
-            const base = scoreEmail(String(rawEmail));
-            if (!base) continue;
+            const email = String(rawEmail).trim().toLowerCase();
+            if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) continue;
             const rawDecision = String(row.decision ?? "").toLowerCase();
+            const rawProbability = Number(row.selection_probability);
+            const isPreScoredQueue = ["selected", "review", "blocked"].includes(rawDecision)
+              && Number.isFinite(rawProbability);
+            if (isPreScoredQueue) {
+              directContacts.push({
+                id: String(row.email_id || email),
+                email,
+                domain: String(row.domain || email.split("@")[1]),
+                probability: rawProbability,
+                decision: rawDecision as Decision,
+                reason: String(row.decision_reason || "Imported model decision"),
+                approval: ["pending", "approved", "rejected"].includes(String(row.approval_status).toLowerCase())
+                  ? String(row.approval_status).toLowerCase() as Approval : "pending",
+                sendStatus: String(row.send_status).toLowerCase() === "test_sent" ? "test_sent" : "not_sent",
+              });
+              continue;
+            }
+            const base = scoreEmail(email);
+            if (!base) continue;
             const decision: Decision = ["selected", "review", "blocked"].includes(rawDecision)
               ? rawDecision as Decision : base.decision;
-            const rawProbability = Number(row.selection_probability);
             directContacts.push({
               ...base,
               id: String(row.email_id || base.id),
@@ -116,28 +134,74 @@ export default function Home() {
       };
 
       if (file.name.toLowerCase().endsWith(".csv")) {
-        setImportStage("Reading CSV chunks in the background…");
-        const Papa = (await import("papaparse")).default;
-        await new Promise<void>((resolve, reject) => {
-          let lastReported = 0;
-          Papa.parse<Record<string, unknown>>(file, {
-            header: true,
-            worker: true,
-            skipEmptyLines: true,
-            chunkSize: 8 * 1024 * 1024,
-            chunk: (result) => {
-              addRows(result.data);
-              const progress = Math.min(99, Math.round(((result.meta.cursor ?? 0) / file.size) * 100));
-              if (progress - lastReported >= 5) {
-                lastReported = progress;
-                setImportProgress(progress);
-                setImportStage(`Reading CSV rows… ${progress}%`);
+        const header = await file.slice(0, 600).text();
+        const isPipelineQueue = header.startsWith("email,")
+          && header.includes("email_id,selection_probability,selection_threshold,model_version,decision,decision_reason,domain_rank,approval_status,send_status");
+        if (isPipelineQueue) {
+          setImportStage("Using instant pipeline-queue reader…");
+          const text = await file.text();
+          const lines = text.split(/\r?\n/);
+          for (let start = 1; start < lines.length; start += 50000) {
+            const finish = Math.min(lines.length, start + 50000);
+            for (let index = start; index < finish; index++) {
+              const line = lines[index];
+              if (!line) continue;
+              const firstComma = line.indexOf(",");
+              if (firstComma < 1) continue;
+              const email = line.slice(0, firstComma).trim().toLowerCase();
+              const tail = new Array<string>(9);
+              let end = line.length;
+              let valid = true;
+              for (let field = 8; field >= 0; field--) {
+                const comma = line.lastIndexOf(",", end - 1);
+                if (comma < 0) { valid = false; break; }
+                tail[field] = line.slice(comma + 1, end);
+                end = comma;
               }
-            },
-            complete: () => resolve(),
-            error: reject,
+              if (!valid) continue;
+              const probability = Number(tail[1]);
+              const decision = tail[4] as Decision;
+              if (!Number.isFinite(probability) || !["selected", "review", "blocked"].includes(decision)) continue;
+              directContacts.push({
+                id: tail[0] || email,
+                email,
+                domain: email.split("@")[1] || "",
+                probability,
+                decision,
+                reason: tail[5] || "Imported model decision",
+                approval: ["pending", "approved", "rejected"].includes(tail[7]) ? tail[7] as Approval : "pending",
+                sendStatus: tail[8] === "test_sent" ? "test_sent" : "not_sent",
+              });
+            }
+            const progress = Math.min(99, Math.round((finish / lines.length) * 100));
+            setImportProgress(progress);
+            setImportStage(`Loading pre-scored queue… ${progress}%`);
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          }
+        } else {
+          setImportStage("Reading CSV chunks in the background…");
+          const Papa = (await import("papaparse")).default;
+          await new Promise<void>((resolve, reject) => {
+            let lastReported = 0;
+            Papa.parse<Record<string, unknown>>(file, {
+              header: true,
+              worker: true,
+              skipEmptyLines: true,
+              chunkSize: 8 * 1024 * 1024,
+              chunk: (result) => {
+                addRows(result.data);
+                const progress = Math.min(99, Math.round(((result.meta.cursor ?? 0) / file.size) * 100));
+                if (progress - lastReported >= 5) {
+                  lastReported = progress;
+                  setImportProgress(progress);
+                  setImportStage(`Reading CSV rows… ${progress}%`);
+                }
+              },
+              complete: () => resolve(),
+              error: reject,
+            });
           });
-        });
+        }
       } else {
         const XLSX = await import("xlsx");
         const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
