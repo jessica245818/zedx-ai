@@ -85,6 +85,25 @@ export default function Home() {
     setImportProgress(0);
     setImportStage(file.name.toLowerCase().endsWith(".csv") ? "Preparing fast CSV reader…" : "Opening Excel workbook — this is usually the slowest step…");
     try {
+      const updateReadProgress = (loaded: number, total: number, label: string) => {
+        const progress = total ? Math.max(1, Math.min(90, Math.round((loaded / total) * 90))) : 1;
+        setImportProgress(progress);
+        setImportStage(`${label}… ${progress}%`);
+      };
+      const readAsText = (source: File) => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onprogress = (event) => updateReadProgress(event.loaded, event.total || source.size, "Reading file bytes");
+        reader.onload = () => resolve(String(reader.result ?? ""));
+        reader.onerror = () => reject(reader.error ?? new Error("The browser could not read this file."));
+        reader.readAsText(source);
+      });
+      const readAsArrayBuffer = (source: File) => new Promise<ArrayBuffer>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onprogress = (event) => updateReadProgress(event.loaded, event.total || source.size, "Reading Excel bytes");
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error ?? new Error("The browser could not read this workbook."));
+        reader.readAsArrayBuffer(source);
+      });
       const directContacts: Contact[] = [];
       const extractedEmails = new Set<string>();
       const addRows = (rows: Record<string, unknown>[]) => {
@@ -139,7 +158,8 @@ export default function Home() {
           && header.includes("email_id,selection_probability,selection_threshold,model_version,decision,decision_reason,domain_rank,approval_status,send_status");
         if (isPipelineQueue) {
           setImportStage("Using instant pipeline-queue reader…");
-          const text = await file.text();
+          setImportProgress(1);
+          const text = await readAsText(file);
           const lines = text.split(/\r?\n/);
           for (let start = 1; start < lines.length; start += 50000) {
             const finish = Math.min(lines.length, start + 50000);
@@ -185,7 +205,7 @@ export default function Home() {
             let lastReported = 0;
             Papa.parse<Record<string, unknown>>(file, {
               header: true,
-              worker: true,
+            worker: false,
               skipEmptyLines: true,
               chunkSize: 8 * 1024 * 1024,
               chunk: (result) => {
@@ -204,7 +224,7 @@ export default function Home() {
         }
       } else {
         const XLSX = await import("xlsx");
-        const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+        const workbook = XLSX.read(await readAsArrayBuffer(file), { type: "array" });
         setImportStage("Extracting email rows from the first worksheet…");
         addRows(XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" }));
       }
@@ -218,8 +238,8 @@ export default function Home() {
       setPage(1);
       setImportStage("Rendering the first 50 contacts…");
       notify(`${scored.length} unique emails imported and scored`);
-    } catch {
-      notify("That file could not be read. Try CSV or XLSX.");
+    } catch (error) {
+      notify(`Import failed: ${error instanceof Error ? error.message : "The file could not be read."}`, 6000);
     } finally {
       setUploading(false); setImportProgress(0); setImportStage(""); event.target.value = "";
     }
