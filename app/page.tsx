@@ -47,6 +47,7 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [uploading, setUploading] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
+  const [importStage, setImportStage] = useState("");
   const [page, setPage] = useState(1);
 
   const visible = useMemo(() => {
@@ -82,6 +83,7 @@ export default function Home() {
     if (!file) return;
     setUploading(true);
     setImportProgress(0);
+    setImportStage(file.name.toLowerCase().endsWith(".csv") ? "Preparing fast CSV reader…" : "Opening Excel workbook — this is usually the slowest step…");
     try {
       const directContacts: Contact[] = [];
       const extractedEmails = new Set<string>();
@@ -114,6 +116,7 @@ export default function Home() {
       };
 
       if (file.name.toLowerCase().endsWith(".csv")) {
+        setImportStage("Reading CSV chunks in the background…");
         const Papa = (await import("papaparse")).default;
         await new Promise<void>((resolve, reject) => {
           let lastReported = 0;
@@ -128,6 +131,7 @@ export default function Home() {
               if (progress - lastReported >= 5) {
                 lastReported = progress;
                 setImportProgress(progress);
+                setImportStage(`Reading CSV rows… ${progress}%`);
               }
             },
             complete: () => resolve(),
@@ -137,8 +141,10 @@ export default function Home() {
       } else {
         const XLSX = await import("xlsx");
         const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+        setImportStage("Extracting email rows from the first worksheet…");
         addRows(XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" }));
       }
+      setImportStage("Building the contact queue…");
       const scored = directContacts.length
         ? directContacts
         : [...extractedEmails].map(scoreEmail).filter((item): item is Contact => Boolean(item));
@@ -146,11 +152,12 @@ export default function Home() {
       setContacts(scored);
       setSelectedId(scored[0]?.id ?? "");
       setPage(1);
+      setImportStage("Rendering the first 50 contacts…");
       notify(`${scored.length} unique emails imported and scored`);
     } catch {
       notify("That file could not be read. Try CSV or XLSX.");
     } finally {
-      setUploading(false); setImportProgress(0); event.target.value = "";
+      setUploading(false); setImportProgress(0); setImportStage(""); event.target.value = "";
     }
   };
   const sendTest = () => {
@@ -182,7 +189,6 @@ export default function Home() {
           <div className="pipeline-row"><span>Model</span><b>local email-selector-v1</b></div>
           <div className="pipeline-row"><span>Selection threshold</span><b>0.80</b></div>
           <div className="pipeline-row"><span>Domain limit</span><b>1 contact</b></div>
-          <div className="pipeline-note"><AlertTriangle size={16} /> Weak-label model — human approval required.</div>
         </div>
       </section>
 
@@ -200,6 +206,7 @@ export default function Home() {
             <label className="search"><Search size={17} /><input aria-label="Search contacts" placeholder="Search email or domain" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} /></label>
             <label className="filter"><Filter size={16} /><select aria-label="Filter decisions" value={filter} onChange={(e) => { setFilter(e.target.value as typeof filter); setPage(1); }}><option value="all">All decisions</option><option value="selected">Selected</option><option value="review">Review</option><option value="blocked">Blocked</option></select><ChevronDown size={14} /></label>
           </div>
+          {uploading && <div className="import-status" role="status"><span><Activity size={15} /> {importStage}</span><strong>{importProgress}%</strong><i><em style={{ width: `${importProgress}%` }} /></i></div>}
           <div className="table-wrap">
             <table>
               <thead><tr><th>Contact</th><th>Score</th><th>Decision</th><th>Approval</th><th /></tr></thead>
