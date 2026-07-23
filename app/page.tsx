@@ -14,23 +14,7 @@ type Contact = {
   sendStatus: "not_sent" | "test_sent";
 };
 
-const initialContacts: Contact[] = [
-  ["demo-01", "partnerships@northstar.example", "northstar.example", .98, "selected"],
-  ["demo-02", "founder@brightworks.example", "brightworks.example", .97, "selected"],
-  ["demo-03", "growth@fieldstone.example", "fieldstone.example", .94, "selected"],
-  ["demo-04", "marketing@atlaslab.example", "atlaslab.example", .93, "selected"],
-  ["demo-05", "director@harborco.example", "harborco.example", .91, "selected"],
-  ["demo-06", "office@redwood.example", "redwood.example", .68, "review"],
-  ["demo-07", "hello@sunroom.example", "sunroom.example", .61, "review"],
-  ["demo-08", "contact@orbital.example", "orbital.example", .58, "review"],
-].map(([id, email, domain, probability, decision]) => ({
-  id: String(id), email: String(email), domain: String(domain),
-  probability: Number(probability), decision: decision as Decision,
-  reason: decision === "selected" ? "Model score passed the 0.80 threshold" : "High score, unusual mailbox — review required",
-  approval: "pending", sendStatus: "not_sent",
-}));
-
-const totals = { scanned: 323030, selected: 41206, review: 273763, blocked: 8061 };
+const initialContacts: Contact[] = [];
 
 function scoreEmail(email: string): Contact | null {
   const clean = email.trim().toLowerCase();
@@ -55,7 +39,7 @@ export default function Home() {
   const [contacts, setContacts] = useState(initialContacts);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | Decision>("all");
-  const [selectedId, setSelectedId] = useState(initialContacts[0].id);
+  const [selectedId, setSelectedId] = useState("");
   const [subject, setSubject] = useState("A quick introduction");
   const [body, setBody] = useState("Hello,\n\nI’m reaching out because your role appears relevant to a potential partnership.\n\n[Add a truthful, specific value proposition here.]\n\nIf this is not relevant, reply “no” and we will not contact you again.\n\nBest,\n[Your name]");
   const [testAddress, setTestAddress] = useState("");
@@ -68,6 +52,12 @@ export default function Home() {
   }), [contacts, query, filter]);
   const active = contacts.find((contact) => contact.id === selectedId) ?? contacts[0];
   const approvedCount = contacts.filter((contact) => contact.approval === "approved").length;
+  const totals = {
+    scanned: contacts.length,
+    selected: contacts.filter((contact) => contact.decision === "selected").length,
+    review: contacts.filter((contact) => contact.decision === "review").length,
+    blocked: contacts.filter((contact) => contact.decision === "blocked").length,
+  };
 
   const notify = (message: string, duration = 2700) => {
     setToast(message); window.setTimeout(() => setToast(""), duration);
@@ -84,12 +74,36 @@ export default function Home() {
       const XLSX = await import("xlsx");
       const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
       const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
-      const found = new Set<string>();
-      rows.forEach((row) => Object.values(row).forEach((value) => {
-        (String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []).forEach((email) => found.add(email.toLowerCase()));
-      }));
-      const scored = [...found].map(scoreEmail).filter((item): item is Contact => Boolean(item));
-      setContacts((current) => [...scored, ...current.filter((item) => !found.has(item.email))]);
+      const queueRows = rows.map((row) => {
+        const rawEmail = row.email ?? row.contact_value;
+        if (!rawEmail) return null;
+        const base = scoreEmail(String(rawEmail));
+        if (!base) return null;
+        const rawDecision = String(row.decision ?? "").toLowerCase();
+        const decision: Decision = ["selected", "review", "blocked"].includes(rawDecision)
+          ? rawDecision as Decision : base.decision;
+        const rawProbability = Number(row.selection_probability);
+        return {
+          ...base,
+          id: String(row.email_id || base.id),
+          probability: Number.isFinite(rawProbability) ? rawProbability : base.probability,
+          decision,
+          reason: String(row.decision_reason || base.reason),
+          approval: ["pending", "approved", "rejected"].includes(String(row.approval_status).toLowerCase())
+            ? String(row.approval_status).toLowerCase() as Approval : "pending",
+        };
+      }).filter((item): item is Contact => Boolean(item));
+
+      let scored = queueRows;
+      if (!scored.length) {
+        const found = new Set<string>();
+        rows.forEach((row) => Object.values(row).forEach((value) => {
+          (String(value).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []).forEach((email) => found.add(email.toLowerCase()));
+        }));
+        scored = [...found].map(scoreEmail).filter((item): item is Contact => Boolean(item));
+      }
+      setContacts(scored);
+      setSelectedId(scored[0]?.id ?? "");
       notify(`${scored.length} unique emails imported and scored`);
     } catch {
       notify("That file could not be read. Try CSV or XLSX.");
@@ -130,8 +144,8 @@ export default function Home() {
       </section>
 
       <section className="metrics" aria-label="Pipeline totals">
-        <Metric label="Emails scanned" value={totals.scanned} note="validated contacts" tone="neutral" />
-        <Metric label="AI selected" value={totals.selected} note="12.8% of total" tone="green" />
+        <Metric label="Emails loaded" value={totals.scanned} note="from your file" tone="neutral" />
+        <Metric label="Model selected" value={totals.selected} note={totals.scanned ? `${((totals.selected / totals.scanned) * 100).toFixed(1)}% of file` : "waiting for import"} tone="green" />
         <Metric label="Needs review" value={totals.review} note="human decision" tone="amber" />
         <Metric label="Safety blocked" value={totals.blocked} note="never eligible" tone="red" />
       </section>
@@ -153,14 +167,14 @@ export default function Home() {
                   <td><DecisionBadge decision={contact.decision} /></td><td><ApprovalBadge approval={contact.approval} /></td>
                   <td className="row-actions">{contact.decision !== "blocked" && <><button aria-label={`Approve ${contact.email}`} onClick={(e) => { e.stopPropagation(); updateApproval(contact.id, "approved"); }}><Check size={16} /></button><button aria-label={`Reject ${contact.email}`} onClick={(e) => { e.stopPropagation(); updateApproval(contact.id, "rejected"); }}><X size={16} /></button></>}</td>
                 </tr>
-              ))}</tbody>
+              ))}{!visible.length && <tr><td colSpan={5} className="empty-row"><FileUp size={22} /><strong>Import your CSV or Excel file to begin</strong><span>No contacts are built into this app.</span></td></tr>}</tbody>
             </table>
           </div>
         </div>
 
         <aside className="composer">
           <div className="composer-head"><div><p className="eyebrow">Message lab</p><h2>Compose & test</h2></div><span className="draft-badge">Draft</span></div>
-          <div className="recipient"><span>Preview recipient</span><strong>{active?.email}</strong><small><DecisionBadge decision={active?.decision ?? "review"} /> {active?.reason}</small></div>
+          <div className="recipient"><span>Preview recipient</span><strong>{active?.email ?? "Import a file to choose a recipient"}</strong>{active && <small><DecisionBadge decision={active.decision} /> {active.reason}</small>}</div>
           <label className="field"><span>Subject</span><input aria-label="Email subject" value={subject} onChange={(e) => setSubject(e.target.value)} /></label>
           <label className="field"><span>Message</span><textarea aria-label="Email message" value={body} onChange={(e) => setBody(e.target.value)} /></label>
           <div className="test-box">
