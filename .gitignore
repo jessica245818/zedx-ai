@@ -21,6 +21,8 @@
 # misc
 .DS_Store
 *.pem
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
 # debug
 npm-debug.log*

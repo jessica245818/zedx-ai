@@ -1,7 +1,9 @@
 {
-  "name": "site-creator-vinext-starter",
+  "name": "zedx-ai",
+  "productName": "ZedX AI",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.mjs",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -12,12 +14,15 @@
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
+    ,"desktop": "electron ."
+    ,"desktop:mac": "electron-builder --mac dmg zip"
   },
   "dependencies": {
     "@types/papaparse": "^5.5.2",
     "drizzle-orm": "0.45.2",
     "lucide-react": "^1.25.0",
     "next": "16.2.6",
+    "nodemailer": "^9.0.3",
     "papaparse": "^5.5.4",
     "react": "19.2.6",
     "react-dom": "19.2.6",
@@ -27,11 +32,14 @@
     "@cloudflare/vite-plugin": "1.37.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",
@@ -41,5 +49,27 @@
     "vite": "8.0.13",
     "wrangler": "4.92.0"
   },
-  "type": "module"
+  "type": "module",
+  "build": {
+    "appId": "com.zedfilmx.zedxai",
+    "productName": "ZedX AI",
+    "protocols": [
+      {
+        "name": "ZedX AI Gmail callback",
+        "schemes": ["zedx-ai"]
+      }
+    ],
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": ["dmg", "zip"],
+      "x64ArchFiles": "**/*.{node,dylib}"
+    },
+    "dmg": {
+      "title": "ZedX AI"
+    }
+  }
 }

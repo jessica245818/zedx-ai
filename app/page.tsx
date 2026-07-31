@@ -1,20 +1,59 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   Activity, AlertTriangle, Check, ChevronDown, CircleCheck, Download, FileUp,
-  Filter, Mail, Play, Search, Send, ShieldCheck, Sparkles,
+  Filter, Link2, Mail, Search, Send, ShieldCheck, Sparkles, Unplug,
 } from "lucide-react";
+
+declare global {
+  interface Window {
+    zedxDesktop?: {
+      platform: string;
+      hostinger: (payload: Record<string, unknown>) => Promise<{ ok?: boolean; error?: string; id?: string }>;
+      openExternal: (url: string) => Promise<{ ok?: boolean }>;
+    };
+  }
+}
 
 type Decision = "selected" | "review" | "blocked";
 type Approval = "pending" | "approved" | "rejected";
 type Contact = {
   id: string; email: string; domain: string; probability: number;
   decision: Decision; reason: string; approval: Approval;
-  sendStatus: "not_sent" | "test_sent" | "ready";
+  sendStatus: "not_sent" | "ready" | "queued" | "sent" | "failed";
+  gmailMessageId?: string;
+  deliveryError?: string;
 };
+type Mailbox = { configured: boolean; connected: boolean; email?: string; provider?: string };
+
+const GOOGLE_CLIENT_ID = "276798839321-d2qtoru8eal9kna4m048ohbu8srcg9te.apps.googleusercontent.com";
 
 const initialContacts: Contact[] = [];
+
+function titleCase(value: string) {
+  return value
+    .replace(/[-_.]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+function personalizeMessage(email: string, message: string) {
+  const [localPart, domain = ""] = email.toLowerCase().split("@");
+  const parts = localPart.split(/[._-]+/).filter(Boolean);
+  const businessMailboxes = new Set([
+    "admin", "business", "contact", "enquiries", "hello", "info", "inquiries",
+    "marketing", "office", "sales", "support", "team",
+  ]);
+  const isBusinessMailbox = parts.length === 0 || parts.some((part) => businessMailboxes.has(part));
+  const company = titleCase(domain.split(".")[0] || "Company");
+  const recipientName = isBusinessMailbox ? `${company} Team` : titleCase(parts[0] || localPart);
+  const greeting = `Dear ${recipientName},`;
+  if (/^(hello|hi|dear)\b[^\n]*,?\s*/i.test(message)) {
+    return message.replace(/^(hello|hi|dear)\b[^\n]*,?\s*/i, `${greeting}\n\n`);
+  }
+  return `${greeting}\n\n${message}`;
+}
 
 function scoreEmail(email: string): Contact | null {
   const clean = email.trim().toLowerCase();
@@ -36,20 +75,40 @@ function scoreEmail(email: string): Contact | null {
 }
 
 export default function Home() {
+  const desktopMode = typeof window !== "undefined" && Boolean(window.zedxDesktop);
   const PAGE_SIZE = 50;
   const [contacts, setContacts] = useState(initialContacts);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | Decision>("selected");
   const [autoSend, setAutoSend] = useState(true);
+  const [selectionThreshold, setSelectionThreshold] = useState(0.8);
   const [selectedId, setSelectedId] = useState("");
   const [subject, setSubject] = useState("A quick introduction");
-  const [body, setBody] = useState("Hello,\n\nI’m reaching out because your role appears relevant to a potential partnership.\n\n[Add a truthful, specific value proposition here.]\n\nIf this is not relevant, reply “no” and we will not contact you again.\n\nBest,\n[Your name]");
+  const [body, setBody] = useState("Hello,\n\nI’m reaching out from ZedX, a digital marketing company specializing in digital advertising and CGI and VFX content.\n\nWe help brands create visually distinctive campaigns and content designed to capture attention across digital platforms. I thought our work could be relevant to your team and would be glad to explore how ZedX could support an upcoming campaign or creative project.\n\nYou can learn more about our work at https://zedfilmx.com.\n\nIf this is not relevant, simply reply “no” and we will not contact you again.\n\nBest,\nThe ZedX Team");
   const [testAddress, setTestAddress] = useState("");
   const [toast, setToast] = useState("");
   const [uploading, setUploading] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
   const [importStage, setImportStage] = useState("");
   const [page, setPage] = useState(1);
+  const [mailbox, setMailbox] = useState<Mailbox>({ configured: false, connected: false });
+  const [connecting, setConnecting] = useState(false);
+  const [minDelay, setMinDelay] = useState(90);
+  const [maxDelay, setMaxDelay] = useState(180);
+  const [sending, setSending] = useState(false);
+  const [accessToken, setAccessToken] = useState("");
+  const [hostingerEmail, setHostingerEmail] = useState("");
+  const [hostingerPassword, setHostingerPassword] = useState("");
+  const [hostingerServer, setHostingerServer] = useState("smtp.hostinger.com");
+  const [hostingerError, setHostingerError] = useState("");
+  const [showHostinger, setShowHostinger] = useState(false);
+
+  useEffect(() => {
+    setMailbox({ configured: true, connected: false });
+    fetch("/api/mail/google/account").then((result) => result.json()).then((profile: { connected?: boolean; email?: string }) => {
+      if (profile.connected) setMailbox({ configured: true, connected: true, email: profile.email || "Connected Gmail", provider: "Google" });
+    }).catch(() => undefined);
+  }, []);
 
   const visible = useMemo(() => {
     if (!query && filter === "all") return contacts;
@@ -67,9 +126,152 @@ export default function Home() {
     review: contacts.filter((contact) => contact.decision === "review").length,
     blocked: contacts.filter((contact) => contact.decision === "blocked").length,
   }), [contacts]);
+  const approvedCount = contacts.filter((contact) => contact.approval === "approved").length;
+  const deliveryTotals = useMemo(() => ({
+    sent: contacts.filter((contact) => contact.sendStatus === "sent").length,
+    queued: contacts.filter((contact) => contact.sendStatus === "queued").length,
+    failed: contacts.filter((contact) => contact.sendStatus === "failed").length,
+    skipped: contacts.filter((contact) => contact.decision !== "selected" && contact.sendStatus === "not_sent").length,
+  }), [contacts]);
+  const processedCount = deliveryTotals.sent + deliveryTotals.failed + deliveryTotals.skipped;
 
   const notify = (message: string, duration = 2700) => {
     setToast(message); window.setTimeout(() => setToast(""), duration);
+  };
+  const updateSelectionThreshold = (nextValue: number) => {
+    const next = Math.max(0.05, Math.min(0.99, nextValue));
+    setSelectionThreshold(next);
+    setContacts((current) => current.map((contact) => {
+      if (contact.decision === "blocked" || ["queued", "sent"].includes(contact.sendStatus)) return contact;
+      const selected = contact.probability >= next;
+      return {
+        ...contact,
+        decision: selected ? "selected" : "review",
+        reason: selected ? `Score meets the ${(next * 100).toFixed(0)}% selection threshold` : `Score is below the ${(next * 100).toFixed(0)}% selection threshold`,
+        sendStatus: autoSend && selected ? "ready" : "not_sent",
+      };
+    }));
+  };
+  const connectMailbox = async (provider: "google" | "microsoft" | "icloud" | "imap") => {
+    if (provider !== "google") return notify("This free build currently connects Gmail directly.", 5000);
+    if (desktopMode) {
+      setConnecting(false);
+      await window.zedxDesktop!.openExternal(`${window.location.origin}/api/mail/google/connect?desktop=1`);
+      return notify("Google login opened in your browser. After approval, ZedX AI will reopen here as connected.", 9000);
+    }
+    setConnecting(true);
+    window.location.assign("/api/mail/google/connect");
+  };
+  const disconnectMailbox = async () => {
+    const wasGoogle = mailbox.provider === "Google";
+    setConnecting(false);
+    setMailbox({ configured: true, connected: false });
+    setHostingerPassword("");
+    setHostingerError("");
+    setShowHostinger(!wasGoogle);
+    if (wasGoogle) await fetch("/api/mail/google/disconnect", { method: "POST" }).catch(() => undefined);
+    window.sessionStorage.removeItem("zedx_gmail_token");
+    setAccessToken("");
+    notify("Sending account disconnected");
+  };
+  const connectHostinger = async () => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(hostingerEmail) || !hostingerPassword) return notify(`Enter the Hostinger business email and ${desktopMode ? "mailbox password" : hostingerServer === "smtp.hostinger.com" ? "Mail API token" : "mailbox password"}`, 5000);
+    setConnecting(true);
+    setHostingerError("");
+    try {
+      const payload = { action: "test", email: hostingerEmail, password: hostingerPassword, server: hostingerServer };
+      const result = desktopMode
+        ? await window.zedxDesktop!.hostinger(payload)
+        : await fetch("/api/mail/hostinger", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+          }).then(async (response) => ({ response, result: await response.json() as { error?: string } }))
+            .then(({ response, result }) => response.ok ? { ok: true } : { ok: false, error: result.error });
+      if (!result.ok) throw new Error(result.error || "Hostinger rejected the connection.");
+      setMailbox({ configured: true, connected: true, email: hostingerEmail, provider: "Hostinger" });
+      setShowHostinger(false);
+      notify(`Hostinger connected as ${hostingerEmail}`, 5000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Hostinger connection failed";
+      setHostingerError(message);
+      notify(message, 10000);
+    } finally { setConnecting(false); }
+  };
+  const encodeMessage = (to: string) => {
+    const localMessageId = `<${crypto.randomUUID()}@zedx-ai.local>`;
+    const mime = `From: ${mailbox.email || "me"}\r\nTo: ${to}\r\nSubject: ${subject}\r\nDate: ${new Date().toUTCString()}\r\nMessage-ID: ${localMessageId}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset="UTF-8"\r\nContent-Transfer-Encoding: 8bit\r\n\r\n${personalizeMessage(to, body)}`;
+    const bytes = new TextEncoder().encode(mime);
+    let binary = "";
+    bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+    return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  };
+  const queueMessages = async (source = contacts, immediate = false) => {
+    const recipients = source.filter((contact) =>
+      (autoSend ? contact.decision === "selected" : contact.approval === "approved")
+      && !["queued", "sent"].includes(contact.sendStatus)
+    ).map((contact) => contact.email);
+    if (!mailbox.connected || (mailbox.provider === "Hostinger" && !hostingerPassword)) return notify("Connect a sending account first", 5000);
+    if (!recipients.length) return notify("There are no unsent selected recipients");
+    setSending(true);
+    const limited = recipients.slice(0, 50);
+    setContacts((current) => current.map((contact) => limited.includes(contact.email) ? { ...contact, sendStatus: "queued" } : contact));
+    const normalizedMinDelay = Math.max(1, Math.round(minDelay));
+    const normalizedMaxDelay = Math.max(normalizedMinDelay, Math.round(maxDelay));
+    let elapsed = 0;
+    limited.forEach((email, index) => {
+      if (index > 0) elapsed += autoSend
+        ? Math.round((normalizedMinDelay + Math.random() * (normalizedMaxDelay - normalizedMinDelay)) * 1000)
+        : 350;
+      window.setTimeout(async () => {
+        try {
+          const hostingerPayload = { action: "send", email: mailbox.email, password: hostingerPassword, server: hostingerServer, to: email, subject, body: personalizeMessage(email, body) };
+          const desktopResult = mailbox.provider === "Hostinger" && desktopMode ? await window.zedxDesktop!.hostinger(hostingerPayload) : null;
+          const response = mailbox.provider === "Hostinger" && desktopMode ? new Response(JSON.stringify(desktopResult), {
+            status: desktopResult?.ok ? 200 : 502, headers: { "Content-Type": "application/json" },
+          }) : mailbox.provider === "Hostinger" ? await fetch("/api/mail/hostinger", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hostingerPayload),
+          }) : await fetch("/api/mail/google/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ to: email, subject, body: personalizeMessage(email, body) }),
+          });
+          if (!response.ok) {
+            setContacts((current) => current.map((contact) => contact.email === email
+              ? { ...contact, sendStatus: "failed" }
+              : contact));
+            const failure = await response.json().catch(() => null) as { error?: string | { message?: string }; code?: string } | null;
+            const failureMessage = typeof failure?.error === "string" ? failure.error : failure?.error?.message;
+            if (failure?.code === "RECONNECT_REQUIRED" || response.status === 401) {
+              setMailbox({ configured: true, connected: false });
+              setContacts((current) => current.map((contact) => contact.email === email
+                ? { ...contact, sendStatus: autoSend ? "ready" : "not_sent" }
+                : contact));
+              document.getElementById("mailbox-connection")?.scrollIntoView({ behavior: "smooth", block: "center" });
+              notify(failureMessage || "Your Gmail session expired. Reconnect Gmail and retry.", 12000);
+              return;
+            }
+            setContacts((current) => current.map((contact) => contact.email === email
+              ? { ...contact, deliveryError: failureMessage || `Gmail HTTP ${response.status}` }
+              : contact));
+            notify(`Gmail rejected ${email}: ${failureMessage || `HTTP ${response.status}`}`, 10000);
+          } else {
+            const sent = await response.json() as { id?: string; ok?: boolean };
+            if (mailbox.provider === "Google" && !sent.id) throw new Error("Gmail accepted the request without returning a message reference.");
+            setContacts((current) => current.map((contact) => contact.email === email
+              ? { ...contact, sendStatus: "sent", gmailMessageId: sent.id }
+              : contact));
+            notify(mailbox.provider === "Hostinger" ? `Accepted by Hostinger for ${email}.` : `Accepted by Gmail for ${email} · reference ${sent.id}. Check the sender's Sent folder and the recipient's Spam folder.`, 10000);
+          }
+        } catch (error) {
+          const failureMessage = error instanceof Error ? error.message : "Network error";
+          setContacts((current) => current.map((contact) => contact.email === email ? { ...contact, sendStatus: "failed", deliveryError: failureMessage } : contact));
+          notify(`Send failed for ${email}: ${failureMessage}`, 10000);
+        }
+      }, elapsed);
+    });
+    setSending(false);
+    notify(autoSend
+      ? `${limited.length} real messages queued with campaign pacing${recipients.length > 50 ? " · first 50 processed" : ""}. Keep this tab open.`
+      : `${limited.length} approved messages are sending now${recipients.length > 50 ? " · first 50 processed" : ""}.`, 6000);
   };
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -119,7 +321,7 @@ export default function Home() {
                 reason: String(row.decision_reason || "Imported model decision"),
                 approval: ["pending", "approved", "rejected"].includes(String(row.approval_status).toLowerCase())
                   ? String(row.approval_status).toLowerCase() as Approval : "pending",
-                sendStatus: String(row.send_status).toLowerCase() === "test_sent" ? "test_sent" : "not_sent",
+                sendStatus: String(row.send_status).toLowerCase() === "queued" ? "queued" : "not_sent",
               });
               continue;
             }
@@ -183,7 +385,7 @@ export default function Home() {
                 decision,
                 reason: tail[5] || "Imported model decision",
                 approval: ["pending", "approved", "rejected"].includes(tail[7]) ? tail[7] as Approval : "pending",
-                sendStatus: tail[8] === "test_sent" ? "test_sent" : "not_sent",
+                sendStatus: tail[8] === "queued" ? "queued" : "not_sent",
               });
             }
             const progress = Math.min(99, Math.round((finish / lines.length) * 100));
@@ -225,27 +427,35 @@ export default function Home() {
       const scored = directContacts.length
         ? directContacts
         : [...extractedEmails].map(scoreEmail).filter((item): item is Contact => Boolean(item));
-      const deliveryQueue = scored.map((contact) => (
-        autoSend && contact.decision === "selected"
-          ? { ...contact, sendStatus: "ready" as const }
-          : contact
-      ));
+      const deliveryQueue = scored.map((contact) => {
+        if (contact.decision === "blocked") return contact;
+        const selected = contact.probability >= selectionThreshold;
+        return {
+          ...contact,
+          decision: selected ? "selected" as const : "review" as const,
+          reason: selected ? `Score meets the ${(selectionThreshold * 100).toFixed(0)}% selection threshold` : `Score is below the ${(selectionThreshold * 100).toFixed(0)}% selection threshold`,
+          sendStatus: autoSend && selected ? "ready" as const : "not_sent" as const,
+        };
+      });
       setImportProgress(100);
       setContacts(deliveryQueue);
       setSelectedId(deliveryQueue.find((contact) => contact.decision === "selected")?.id ?? deliveryQueue[0]?.id ?? "");
+      setFilter("all");
       setPage(1);
       setImportStage("Rendering the first 50 contacts…");
       notify(`${deliveryQueue.filter((contact) => contact.decision === "selected").length} recipients selected automatically`);
+      if (autoSend && mailbox.connected && deliveryQueue.some((contact) => contact.decision === "selected")) {
+        window.setTimeout(() => void queueMessages(deliveryQueue), 250);
+      }
     } catch (error) {
       notify(`Import failed: ${error instanceof Error ? error.message : "The file could not be read."}`, 6000);
     } finally {
       setUploading(false); setImportProgress(0); setImportStage(""); event.target.value = "";
     }
   };
-  const sendTest = () => {
+  const sendTest = async () => {
     if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(testAddress)) return notify("Enter a valid test inbox first");
-    notify(`Test simulated for ${testAddress} — no email was transmitted`, 4000);
-    if (active) setContacts((current) => current.map((contact) => contact.id === active.id ? { ...contact, sendStatus: "test_sent" } : contact));
+    await queueMessages([{ ...(active ?? scoreEmail(testAddress)!), email: testAddress, decision: "selected", sendStatus: "ready" }], true);
   };
 
   return (
@@ -253,7 +463,15 @@ export default function Home() {
       <header className="topbar">
         <div className="brand"><span className="brandmark"><Mail size={19} /></span><span>ZedX AI</span></div>
         <div className="top-actions">
-          <label className="auto-toggle"><input type="checkbox" checked={autoSend} onChange={(event) => setAutoSend(event.target.checked)} /><span /><b>Automatic sending</b></label>
+          <button className={`account-chip ${mailbox.connected ? "connected" : ""}`} onClick={() => document.getElementById("mailbox-connection")?.scrollIntoView({ behavior: "smooth" })}>
+            <Link2 size={15} /> {mailbox.connected ? mailbox.email : "Connect email"}
+          </button>
+          <label className="auto-toggle"><input type="checkbox" checked={autoSend} onChange={(event) => {
+            const enabled = event.target.checked;
+            setAutoSend(enabled);
+            setFilter(enabled ? "selected" : "all");
+            setPage(1);
+          }} /><span /><b>Automatic sending</b></label>
           <a className="test-download" href="/test-emails.csv" download><Download size={16} /> Test CSV</a>
           <label className="upload-button"><FileUp size={17} /> {uploading ? `Reading ${importProgress}%` : "Import CSV / Excel"}<input data-testid="file-upload" type="file" accept=".csv,.xlsx,.xls" onChange={handleUpload} /></label>
           <button className="avatar" aria-label="User menu">JG</button>
@@ -266,12 +484,29 @@ export default function Home() {
           <h1>Upload. Decide.<br />Send automatically.</h1>
           <p className="hero-copy">ZedX AI extracts every email, scores it, chooses send or skip, and builds the recipient list without per-contact approval.</p>
         </div>
-        <div className="pipeline-card">
-          <div className="pipeline-head"><span>Pipeline health</span><strong><span className="live-dot" /> Ready</strong></div>
-          <div className="pipeline-row"><span>Model</span><b>local email-selector-v1</b></div>
-          <div className="pipeline-row"><span>Selection threshold</span><b>0.80</b></div>
-          <div className="pipeline-row"><span>Domain limit</span><b>1 contact</b></div>
-        </div>
+        <section
+          className="cursor-stage"
+          aria-label="Interactive ZedX motion artwork"
+          onMouseMove={(event) => {
+            const bounds = event.currentTarget.getBoundingClientRect();
+            const x = (event.clientX - bounds.left) / bounds.width - 0.5;
+            const y = (event.clientY - bounds.top) / bounds.height - 0.5;
+            event.currentTarget.style.setProperty("--cursor-x", `${x * 78}px`);
+            event.currentTarget.style.setProperty("--cursor-y", `${y * 54}px`);
+            event.currentTarget.style.setProperty("--tilt-x", `${y * -18}deg`);
+            event.currentTarget.style.setProperty("--tilt-y", `${x * 24}deg`);
+            event.currentTarget.style.setProperty("--glow-x", `${(x + 0.5) * 100}%`);
+            event.currentTarget.style.setProperty("--glow-y", `${(y + 0.5) * 100}%`);
+          }}
+          onMouseLeave={(event) => {
+            for (const property of ["--cursor-x", "--cursor-y", "--tilt-x", "--tilt-y"]) event.currentTarget.style.removeProperty(property);
+          }}
+        >
+          <div className="orbital-system" aria-hidden="true">
+            <i className="orbit orbit-one" /><i className="orbit orbit-two" /><i className="orbit orbit-three" />
+            <div className="cursor-orb"><img src="/zedx-orb.gif" alt="" /></div>
+          </div>
+        </section>
       </section>
 
       <section className="metrics" aria-label="Pipeline totals">
@@ -280,6 +515,20 @@ export default function Home() {
         <Metric label="Skipped" value={totals.review + totals.blocked} note="not selected to send" tone="amber" />
         <Metric label="Safety blocked" value={totals.blocked} note="never eligible" tone="red" />
       </section>
+      {!!contacts.length && <section className="campaign-progress" aria-label="Campaign progress">
+        <div className="campaign-progress-head">
+          <span><Activity size={16} /><strong>Campaign progress</strong></span>
+          <b>{processedCount.toLocaleString()} of {contacts.length.toLocaleString()} processed</b>
+        </div>
+        <div className="campaign-progress-bar"><i style={{ width: `${Math.round((processedCount / contacts.length) * 100)}%` }} /></div>
+        <div className="campaign-progress-stats">
+          <span><b>{deliveryTotals.sent}</b> Sent</span>
+          <span><b>{deliveryTotals.queued}</b> Queued</span>
+          <span><b>{deliveryTotals.skipped}</b> Skipped</span>
+          <span><b>{deliveryTotals.failed}</b> Failed</span>
+        </div>
+        <small>“Sent” means the connected email provider accepted the message. Final inbox delivery is controlled by the recipient’s provider.</small>
+      </section>}
 
       <section className="workspace">
         <div className="queue-panel">
@@ -291,33 +540,95 @@ export default function Home() {
           {uploading && <div className="import-status" role="status"><span><Activity size={15} /> {importStage}</span><strong>{importProgress}%</strong><i><em style={{ width: `${importProgress}%` }} /></i></div>}
           <div className="table-wrap">
             <table>
-              <thead><tr><th>Contact</th><th>Score</th><th>Decision</th><th>Delivery</th></tr></thead>
+              <thead><tr><th>Contact</th><th>Score</th><th>Decision</th><th>Reason</th><th>Delivery</th>{!autoSend && <th>Approval</th>}</tr></thead>
               <tbody>{displayed.map((contact) => (
                 <tr key={contact.id} className={contact.id === selectedId ? "active-row" : ""} onClick={() => setSelectedId(contact.id)}>
                   <td><strong>{contact.email}</strong><span>{contact.domain}</span></td>
                   <td><div className="score-cell"><span>{Math.round(contact.probability * 100)}%</span><i><em style={{ width: `${contact.probability * 100}%` }} /></i></div></td>
-                  <td><DecisionBadge decision={contact.decision} /></td><td><span className={`delivery delivery-${contact.sendStatus}`}>{contact.sendStatus === "ready" ? "Ready to send" : contact.sendStatus === "test_sent" ? "Test sent" : "Skipped"}</span></td>
+                  <td><DecisionBadge decision={contact.decision} /></td>
+                  <td><span className="reason-cell">{contact.reason}</span></td>
+                  <td><span className={`delivery delivery-${contact.sendStatus}`} title={contact.gmailMessageId ? `Gmail reference: ${contact.gmailMessageId}` : contact.deliveryError}>{contact.sendStatus === "ready" ? (autoSend ? "Ready" : "Approved") : contact.sendStatus === "queued" ? "Queued with delay" : contact.sendStatus === "sent" ? "Sent" : contact.sendStatus === "failed" ? "Failed" : contact.decision === "selected" ? "Waiting" : "Skipped"}</span>{contact.deliveryError && <small className="delivery-error">{contact.deliveryError}</small>}</td>
+                  {!autoSend && <td><div className="row-actions">
+                    <button aria-label={`Approve ${contact.email}`} title="Approve" disabled={contact.sendStatus === "sent"} onClick={(event) => { event.stopPropagation(); setContacts((current) => current.map((item) => item.id === contact.id ? { ...item, approval: "approved", sendStatus: "ready" } : item)); }}><Check size={14} /></button>
+                    <button aria-label={`Deny ${contact.email}`} title="Deny" disabled={contact.sendStatus === "sent"} onClick={(event) => { event.stopPropagation(); setContacts((current) => current.map((item) => item.id === contact.id ? { ...item, approval: "rejected", sendStatus: "not_sent" } : item)); }}><AlertTriangle size={14} /></button>
+                  </div></td>}
                 </tr>
-              ))}{!visible.length && <tr><td colSpan={4} className="empty-row"><FileUp size={22} /><strong>Import your CSV or Excel file to begin</strong><span>No contacts are built into this app.</span></td></tr>}</tbody>
+              ))}{!visible.length && <tr><td colSpan={autoSend ? 5 : 6} className="empty-row"><FileUp size={22} /><strong>Import your CSV or Excel file to begin</strong><span>No contacts are built into this app.</span></td></tr>}</tbody>
             </table>
           </div>
           {visible.length > PAGE_SIZE && <div className="pagination"><span>{((page - 1) * PAGE_SIZE + 1).toLocaleString()}–{Math.min(page * PAGE_SIZE, visible.length).toLocaleString()} of {visible.length.toLocaleString()}</span><div><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button><button disabled={page === pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}>Next</button></div></div>}
+          <div className="pipeline-card pipeline-card-inline">
+            <div className="pipeline-head"><span>Pipeline health</span><strong><span className="live-dot" /> Ready</strong></div>
+            <div className="pipeline-inline-grid">
+              <div className="pipeline-row"><span>Model</span><b>local email-selector-v1</b></div>
+              <div className="pipeline-row"><span>Domain limit</span><b>1 contact</b></div>
+              <div>
+                <div className="pipeline-row threshold-row"><span>Selection threshold</span><b>{selectionThreshold.toFixed(2)}</b></div>
+                <label className="threshold-control">
+                  <input aria-label="Selection threshold" type="range" min="5" max="99" step="1" value={Math.round(selectionThreshold * 100)} onChange={(event) => updateSelectionThreshold(Number(event.target.value) / 100)} />
+                  <input aria-label="Selection threshold percent" type="number" min="5" max="99" value={Math.round(selectionThreshold * 100)} onChange={(event) => updateSelectionThreshold(Number(event.target.value) / 100)} />
+                  <small>%</small>
+                </label>
+              </div>
+            </div>
+          </div>
         </div>
 
         <aside className="composer">
           <div className="composer-head"><div><p className="eyebrow">Message lab</p><h2>Compose & test</h2></div><span className="draft-badge">Draft</span></div>
+          <section className="mailbox-card" id="mailbox-connection">
+            <div className="mailbox-title">
+              <span><Link2 size={17} /><b>Sending account</b></span>
+              {mailbox.connected && <button type="button" className="disconnect-button" aria-label="Disconnect sending account" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void disconnectMailbox(); }}><Unplug size={14} /> Disconnect</button>}
+            </div>
+            {mailbox.connected ? (
+              <div className="connected-mailbox"><CircleCheck size={19} /><span><strong>{mailbox.email}</strong><small>{mailbox.provider} · mail sends from this account</small></span></div>
+            ) : (
+              <>
+                <p>Choose the mailbox that will send the real messages.</p>
+                <div className="provider-grid">
+                  <button disabled={!mailbox.configured} onClick={() => connectMailbox("google")}><b>G</b> Connect Gmail</button>
+                  <button onClick={() => { setConnecting(false); setHostingerError(""); setShowHostinger((current) => !current); }}><b>H</b> Hostinger Email</button>
+                </div>
+                {showHostinger && <div className="hostinger-form">
+                  <select aria-label="Hostinger email service" value={hostingerServer} onChange={(event) => { setHostingerServer(event.target.value); setHostingerError(""); }}>
+                    <option value="smtp.hostinger.com">Hostinger Email</option>
+                    <option value="smtp.titan.email">Hostinger Titan Email</option>
+                  </select>
+                  <input type="email" aria-label="Hostinger business email" placeholder="outreach@your-domain.com" value={hostingerEmail} onChange={(event) => setHostingerEmail(event.target.value)} />
+                  <input type="password" aria-label={desktopMode ? "Hostinger mailbox password" : hostingerServer === "smtp.hostinger.com" ? "Hostinger Mail API token" : "Hostinger Titan mailbox password"} placeholder={desktopMode ? "Mailbox password" : hostingerServer === "smtp.hostinger.com" ? "Hostinger Mail API token" : "Mailbox password"} value={hostingerPassword} onChange={(event) => setHostingerPassword(event.target.value)} />
+                  <button disabled={connecting} onClick={connectHostinger}>{connecting ? "Testing connection…" : "Connect securely"}</button>
+                  {hostingerError && <strong className="hostinger-error">{hostingerError}</strong>}
+                  {desktopMode
+                    ? <small>Desktop direct SMTP connection. The mailbox password stays in this app session and is cleared when disconnected.</small>
+                    : hostingerServer === "smtp.hostinger.com"
+                    ? <small>Create a mailbox-scoped API token in the Hostinger email provisioning area, then paste it here. <a href="https://hpanel.hostinger.com/" target="_blank" rel="noreferrer">Open Hostinger hPanel</a>. The token stays in this browser tab.</small>
+                    : <small>Use the password for this specific Titan mailbox. It stays in this browser tab and is cleared when disconnected.</small>}
+                </div>}
+                <small className="configuration-note"><ShieldCheck size={13} /> Free direct connection. Your Google password is never shared with ZedX AI.</small>
+              </>
+            )}
+          </section>
           <div className="recipient"><span>Preview recipient</span><strong>{active?.email ?? "Import a file to choose a recipient"}</strong>{active && <small><DecisionBadge decision={active.decision} /> {active.reason}</small>}</div>
           <label className="field"><span>Subject</span><input aria-label="Email subject" value={subject} onChange={(e) => setSubject(e.target.value)} /></label>
           <label className="field"><span>Message</span><textarea aria-label="Email message" value={body} onChange={(e) => setBody(e.target.value)} /></label>
           <div className="test-box">
-            <div><Play size={17} /><span><strong>Safe test</strong><small>Sends nowhere. Records a simulation only.</small></span></div>
+            <div><Send size={17} /><span><strong>Real test send</strong><small>Queues one real message through the connected account.</small></span></div>
             <input aria-label="Test inbox" placeholder="your-test-inbox@example.com" value={testAddress} onChange={(e) => setTestAddress(e.target.value)} />
-            <button data-testid="test-send" onClick={sendTest}><Send size={17} /> Run test send</button>
+            <button data-testid="test-send" disabled={sending || !mailbox.connected} onClick={sendTest}><Send size={17} /> {sending ? "Queuing…" : "Send real test"}</button>
           </div>
-          <div className="approval-summary"><CircleCheck size={17} /><span><strong>Automatic decisions enabled</strong><small>Connect a verified email provider for live delivery</small></span></div>
+          <div className="delay-box">
+            <div><span>{autoSend ? "Automatic pacing" : "Manual sending"}</span><strong>{autoSend ? `First email immediately, then ${Math.max(1, minDelay)}–${Math.max(Math.max(1, minDelay), maxDelay)} seconds between emails` : "Approved emails send immediately"}</strong></div>
+            <label><span>Minimum</span><input disabled={!autoSend} type="number" min="1" max="3600" value={minDelay} onChange={(event) => setMinDelay(Number(event.target.value))} /><small>seconds</small></label>
+            <label><span>Maximum</span><input disabled={!autoSend} type="number" min={minDelay} max="7200" value={maxDelay} onChange={(event) => setMaxDelay(Number(event.target.value))} /><small>seconds</small></label>
+          </div>
+          <button className="queue-button" disabled={sending || !mailbox.connected || !(autoSend ? totals.selected : approvedCount)} onClick={() => void queueMessages()}>
+            <Send size={17} /> {sending ? "Queuing real emails…" : autoSend ? `Queue ${totals.selected.toLocaleString()} selected emails` : `Send ${approvedCount.toLocaleString()} approved emails`}
+          </button>
+          <div className="approval-summary"><CircleCheck size={17} /><span><strong>{autoSend ? "Automatic decisions enabled" : "Manual approval enabled"}</strong><small>{autoSend ? "Up to 50 messages are paced per batch. Keep this tab open while they send." : "Approve or deny every address, then send only the approved list."}</small></span></div>
         </aside>
       </section>
-      <footer><span><Activity size={15} /> Local model workflow · no OpenAI API connection</span><span>No external messages are sent in test mode.</span></footer>
+      <footer><span><Activity size={15} /> ZedX AI outreach workflow</span><span>{mailbox.connected ? `Real delivery connected as ${mailbox.email}` : "Connect a mailbox to enable real delivery."}</span></footer>
       {toast && <div className="toast" role="status"><CircleCheck size={18} /> {toast}</div>}
     </main>
   );
