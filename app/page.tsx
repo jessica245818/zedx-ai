@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, AlertTriangle, Check, ChevronDown, CircleCheck, Download, FileUp,
   Filter, Link2, Mail, Search, Send, ShieldCheck, Sparkles, Unplug,
@@ -10,7 +10,7 @@ declare global {
   interface Window {
     zedxDesktop?: {
       platform: string;
-      hostinger: (payload: Record<string, unknown>) => Promise<{ ok?: boolean; error?: string; id?: string }>;
+      hostinger: (payload: Record<string, unknown>) => Promise<{ ok?: boolean; error?: string; id?: string; sentFolderSaved?: boolean; warning?: string }>;
       openExternal: (url: string) => Promise<{ ok?: boolean }>;
     };
   }
@@ -30,6 +30,7 @@ type Mailbox = { configured: boolean; connected: boolean; email?: string; provid
 const GOOGLE_CLIENT_ID = "276798839321-d2qtoru8eal9kna4m048ohbu8srcg9te.apps.googleusercontent.com";
 
 const initialContacts: Contact[] = [];
+const SENT_EMAILS_KEY = "zedx_sent_email_registry_v1";
 
 function titleCase(value: string) {
   return value
@@ -63,13 +64,13 @@ function scoreEmail(email: string): Contact | null {
   const blockedWords = ["support", "help", "legal", "privacy", "abuse", "jobs", "careers", "billing"];
   const desiredWords = ["founder", "ceo", "owner", "director", "partner", "marketing", "growth", "brand", "media", "press", "communications", "businessdevelopment"];
   const personal = ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"].includes(domain);
-  const blocked = personal || blockedWords.some((word) => normalized.includes(word));
-  const selected = desiredWords.some((word) => normalized.includes(word));
+  const blocked = blockedWords.some((word) => normalized.includes(word));
+  const selected = personal || desiredWords.some((word) => normalized.includes(word));
   const decision: Decision = blocked ? "blocked" : selected ? "selected" : "review";
   return {
     id: crypto.randomUUID(), email: clean, domain,
-    probability: blocked ? .12 : selected ? .94 : .58, decision,
-    reason: blocked ? (personal ? "Personal email provider" : "Do-not-contact mailbox role") : selected ? "Relevant outreach role detected" : "No confident role match",
+    probability: blocked ? .12 : personal ? .84 : selected ? .94 : .58, decision,
+    reason: blocked ? "Do-not-contact mailbox role" : personal ? "Valid personal-domain contact" : selected ? "Relevant outreach role detected" : "No confident role match",
     approval: "pending", sendStatus: "not_sent",
   };
 }
@@ -102,13 +103,24 @@ export default function Home() {
   const [hostingerServer, setHostingerServer] = useState("smtp.hostinger.com");
   const [hostingerError, setHostingerError] = useState("");
   const [showHostinger, setShowHostinger] = useState(false);
+  const sentEmailsRef = useRef<Set<string>>(new Set());
+  const reservedEmailsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(SENT_EMAILS_KEY) || "[]") as unknown;
+      if (Array.isArray(stored)) sentEmailsRef.current = new Set(stored.filter((email): email is string => typeof email === "string").map((email) => email.toLowerCase()));
+    } catch { sentEmailsRef.current = new Set(); }
     setMailbox({ configured: true, connected: false });
     fetch("/api/mail/google/account").then((result) => result.json()).then((profile: { connected?: boolean; email?: string }) => {
       if (profile.connected) setMailbox({ configured: true, connected: true, email: profile.email || "Connected Gmail", provider: "Google" });
     }).catch(() => undefined);
   }, []);
+
+  const rememberSent = (email: string) => {
+    sentEmailsRef.current.add(email.toLowerCase());
+    try { window.localStorage.setItem(SENT_EMAILS_KEY, JSON.stringify([...sentEmailsRef.current])); } catch { /* Keep the in-memory registry if storage is unavailable. */ }
+  };
 
   const visible = useMemo(() => {
     if (!query && filter === "all") return contacts;
@@ -208,20 +220,29 @@ export default function Home() {
     const recipients = source.filter((contact) =>
       (autoSend ? contact.decision === "selected" : contact.approval === "approved")
       && !["queued", "sent"].includes(contact.sendStatus)
-    ).map((contact) => contact.email);
+      && !sentEmailsRef.current.has(contact.email)
+      && !reservedEmailsRef.current.has(contact.email)
+    );
     if (!mailbox.connected || (mailbox.provider === "Hostinger" && !hostingerPassword)) return notify("Connect a sending account first", 5000);
-    if (!recipients.length) return notify("There are no unsent selected recipients");
+    if (!recipients.length) return notify("There are no new unsent recipients. Repeated addresses were skipped.");
     setSending(true);
-    const limited = recipients.slice(0, 50);
-    setContacts((current) => current.map((contact) => limited.includes(contact.email) ? { ...contact, sendStatus: "queued" } : contact));
+    recipients.forEach((contact) => reservedEmailsRef.current.add(contact.email));
+    const recipientEmails = new Set(recipients.map((contact) => contact.email));
+    setContacts((current) => current.map((contact) => recipientEmails.has(contact.email) ? { ...contact, sendStatus: "queued" } : contact));
+    setFilter("all");
     const normalizedMinDelay = Math.max(1, Math.round(minDelay));
     const normalizedMaxDelay = Math.max(normalizedMinDelay, Math.round(maxDelay));
-    let elapsed = 0;
-    limited.forEach((email, index) => {
-      if (index > 0) elapsed += autoSend
-        ? Math.round((normalizedMinDelay + Math.random() * (normalizedMaxDelay - normalizedMinDelay)) * 1000)
-        : 350;
-      window.setTimeout(async () => {
+    notify(`${recipients.length} unique messages queued. ZedX AI will advance through every page automatically.`, 6000);
+    try {
+      for (let index = 0; index < recipients.length; index++) {
+        const email = recipients[index].email;
+        if (index > 0 && autoSend && !immediate) {
+          const delay = Math.round((normalizedMinDelay + Math.random() * (normalizedMaxDelay - normalizedMinDelay)) * 1000);
+          await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+        }
+        const sourceIndex = source.findIndex((contact) => contact.email === email);
+        if (sourceIndex >= 0) setPage(Math.floor(sourceIndex / PAGE_SIZE) + 1);
+        setSelectedId(recipients[index].id);
         try {
           const hostingerPayload = { action: "send", email: mailbox.email, password: hostingerPassword, server: hostingerServer, to: email, subject, body: personalizeMessage(email, body) };
           const desktopResult = mailbox.provider === "Hostinger" && desktopMode ? await window.zedxDesktop!.hostinger(hostingerPayload) : null;
@@ -241,6 +262,7 @@ export default function Home() {
             const failure = await response.json().catch(() => null) as { error?: string | { message?: string }; code?: string } | null;
             const failureMessage = typeof failure?.error === "string" ? failure.error : failure?.error?.message;
             if (failure?.code === "RECONNECT_REQUIRED" || response.status === 401) {
+              reservedEmailsRef.current.delete(email);
               setMailbox({ configured: true, connected: false });
               setContacts((current) => current.map((contact) => contact.email === email
                 ? { ...contact, sendStatus: autoSend ? "ready" : "not_sent" }
@@ -252,26 +274,29 @@ export default function Home() {
             setContacts((current) => current.map((contact) => contact.email === email
               ? { ...contact, deliveryError: failureMessage || `Gmail HTTP ${response.status}` }
               : contact));
+            reservedEmailsRef.current.delete(email);
             notify(`Gmail rejected ${email}: ${failureMessage || `HTTP ${response.status}`}`, 10000);
           } else {
-            const sent = await response.json() as { id?: string; ok?: boolean };
+            const sent = await response.json() as { id?: string; ok?: boolean; sentFolderSaved?: boolean; warning?: string };
             if (mailbox.provider === "Google" && !sent.id) throw new Error("Gmail accepted the request without returning a message reference.");
+            rememberSent(email);
+            reservedEmailsRef.current.delete(email);
             setContacts((current) => current.map((contact) => contact.email === email
-              ? { ...contact, sendStatus: "sent", gmailMessageId: sent.id }
+              ? { ...contact, sendStatus: "sent", gmailMessageId: sent.id, deliveryError: sent.warning }
               : contact));
-            notify(mailbox.provider === "Hostinger" ? `Accepted by Hostinger for ${email}.` : `Accepted by Gmail for ${email} · reference ${sent.id}. Check the sender's Sent folder and the recipient's Spam folder.`, 10000);
+            notify(mailbox.provider === "Hostinger" ? `Sent to ${email}${sent.sentFolderSaved === false ? " (Sent-folder sync warning)" : " and saved in Sent"}.` : `Sent to ${email} and saved by Gmail · reference ${sent.id}.`, 8000);
           }
         } catch (error) {
+          reservedEmailsRef.current.delete(email);
           const failureMessage = error instanceof Error ? error.message : "Network error";
           setContacts((current) => current.map((contact) => contact.email === email ? { ...contact, sendStatus: "failed", deliveryError: failureMessage } : contact));
           notify(`Send failed for ${email}: ${failureMessage}`, 10000);
         }
-      }, elapsed);
-    });
-    setSending(false);
-    notify(autoSend
-      ? `${limited.length} real messages queued with campaign pacing${recipients.length > 50 ? " · first 50 processed" : ""}. Keep this tab open.`
-      : `${limited.length} approved messages are sending now${recipients.length > 50 ? " · first 50 processed" : ""}.`, 6000);
+      }
+      notify(`Campaign complete: ${recipients.length} unique recipients processed.`, 8000);
+    } finally {
+      setSending(false);
+    }
   };
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -427,7 +452,29 @@ export default function Home() {
       const scored = directContacts.length
         ? directContacts
         : [...extractedEmails].map(scoreEmail).filter((item): item is Contact => Boolean(item));
-      const deliveryQueue = scored.map((contact) => {
+      const uniqueContacts = new Map<string, Contact>();
+      let repeatedInFile = 0;
+      for (const contact of scored) {
+        if (uniqueContacts.has(contact.email)) repeatedInFile += 1;
+        else uniqueContacts.set(contact.email, contact);
+      }
+      let previouslyContacted = 0;
+      const deliveryQueue = [...uniqueContacts.values()].map((importedContact) => {
+        const rescored = scoreEmail(importedContact.email);
+        const isPersonalDomain = ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com"].includes(importedContact.domain);
+        const contact = isPersonalDomain && rescored && rescored.decision !== "blocked"
+          ? { ...importedContact, probability: Math.max(importedContact.probability, rescored.probability), decision: "selected" as const, reason: "Valid personal-domain contact" }
+          : importedContact;
+        if (sentEmailsRef.current.has(contact.email) || reservedEmailsRef.current.has(contact.email)) {
+          previouslyContacted += 1;
+          return {
+            ...contact,
+            decision: "blocked" as const,
+            reason: "Already contacted — duplicate suppressed",
+            approval: "rejected" as const,
+            sendStatus: "not_sent" as const,
+          };
+        }
         if (contact.decision === "blocked") return contact;
         const selected = contact.probability >= selectionThreshold;
         return {
@@ -443,7 +490,7 @@ export default function Home() {
       setFilter("all");
       setPage(1);
       setImportStage("Rendering the first 50 contacts…");
-      notify(`${deliveryQueue.filter((contact) => contact.decision === "selected").length} recipients selected automatically`);
+      notify(`${deliveryQueue.filter((contact) => contact.decision === "selected").length} recipients selected · ${repeatedInFile + previouslyContacted} duplicates skipped`, 6000);
       if (autoSend && mailbox.connected && deliveryQueue.some((contact) => contact.decision === "selected")) {
         window.setTimeout(() => void queueMessages(deliveryQueue), 250);
       }
@@ -625,7 +672,7 @@ export default function Home() {
           <button className="queue-button" disabled={sending || !mailbox.connected || !(autoSend ? totals.selected : approvedCount)} onClick={() => void queueMessages()}>
             <Send size={17} /> {sending ? "Queuing real emails…" : autoSend ? `Queue ${totals.selected.toLocaleString()} selected emails` : `Send ${approvedCount.toLocaleString()} approved emails`}
           </button>
-          <div className="approval-summary"><CircleCheck size={17} /><span><strong>{autoSend ? "Automatic decisions enabled" : "Manual approval enabled"}</strong><small>{autoSend ? "Up to 50 messages are paced per batch. Keep this tab open while they send." : "Approve or deny every address, then send only the approved list."}</small></span></div>
+          <div className="approval-summary"><CircleCheck size={17} /><span><strong>{autoSend ? "Automatic decisions enabled" : "Manual approval enabled"}</strong><small>{autoSend ? "Every unique selected recipient is processed with pacing, and the table follows campaign progress automatically." : "Approve or deny every address, then send only the approved list."}</small></span></div>
         </aside>
       </section>
       <footer><span><Activity size={15} /> ZedX AI outreach workflow</span><span>{mailbox.connected ? `Real delivery connected as ${mailbox.email}` : "Connect a mailbox to enable real delivery."}</span></footer>

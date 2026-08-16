@@ -13,13 +13,14 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "db:generate": "drizzle-kit generate"
-    ,"desktop": "electron ."
-    ,"desktop:mac": "electron-builder --mac dmg zip"
+    "db:generate": "drizzle-kit generate",
+    "desktop": "electron .",
+    "desktop:mac": "electron-builder --mac dmg zip"
   },
   "dependencies": {
     "@types/papaparse": "^5.5.2",
     "drizzle-orm": "0.45.2",
+    "imapflow": "^1.7.1",
     "lucide-react": "^1.25.0",
     "next": "16.2.6",
     "nodemailer": "^9.0.3",
@@ -56,7 +57,9 @@
     "protocols": [
       {
         "name": "ZedX AI Gmail callback",
-        "schemes": ["zedx-ai"]
+        "schemes": [
+          "zedx-ai"
+        ]
       }
     ],
     "files": [
@@ -65,7 +68,10 @@
     ],
     "mac": {
       "category": "public.app-category.business",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "x64ArchFiles": "**/*.{node,dylib}"
     },
     "dmg": {

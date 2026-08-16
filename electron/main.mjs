@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell, session } from "electron";
+import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +59,45 @@ function transporterFor(payload, forcedHost) {
   });
 }
 
+function rawMessage(email, to, subject, body) {
+  return [
+    `From: ${email}`,
+    `To: ${to}`,
+    `Subject: ${String(subject || "").replace(/[\r\n]+/g, " ").trim()}`,
+    `Date: ${new Date().toUTCString()}`,
+    `Message-ID: <${crypto.randomUUID()}@zedx-ai.app>`,
+    "MIME-Version: 1.0",
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    String(body || ""),
+  ].join("\r\n");
+}
+
+async function appendToSent(payload, email, message, smtpHost) {
+  const client = new ImapFlow({
+    host: smtpHost === "smtp.titan.email" ? "imap.titan.email" : "imap.hostinger.com",
+    port: 993,
+    secure: true,
+    auth: { user: email, pass: String(payload.password || "").trim() },
+    logger: false,
+    connectionTimeout: 20000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
+  });
+  try {
+    await client.connect();
+    const mailboxes = await client.list();
+    const sentMailbox = mailboxes.find((mailbox) => mailbox.specialUse === "\\Sent")
+      || mailboxes.find((mailbox) => /(^|\/)sent( messages| items| mail)?$/i.test(mailbox.path));
+    if (!sentMailbox) throw new Error("The mailbox has no Sent folder.");
+    const appended = await client.append(sentMailbox.path, Buffer.from(message, "utf8"), ["\\Seen"], new Date());
+    if (!appended) throw new Error("The mail server did not confirm the Sent copy.");
+  } finally {
+    await client.logout().catch(() => undefined);
+  }
+}
+
 ipcMain.handle("zedx:hostinger", async (event, payload = {}) => {
   assertTrustedSender(event);
   const email = String(payload.email || "").trim().toLowerCase();
@@ -69,13 +109,23 @@ ipcMain.handle("zedx:hostinger", async (event, payload = {}) => {
     if (payload.action === "send") {
       const to = String(payload.to || "").trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return { ok: false, error: "Enter a valid recipient address." };
-      const result = await transporter.sendMail({
-        from: email,
-        to,
-        subject: String(payload.subject || "").replace(/[\r\n]+/g, " ").trim(),
-        text: String(payload.body || ""),
-      });
-      return { ok: true, provider: "Hostinger SMTP", email, id: result.messageId };
+      const message = rawMessage(email, to, payload.subject, payload.body);
+      const result = await transporter.sendMail({ envelope: { from: email, to }, raw: message });
+      const requestedHost = allowedServers.has(payload.server) ? payload.server : "smtp.hostinger.com";
+      const smtpHost = verifiedHosts.get(email) || requestedHost;
+      try {
+        await appendToSent(payload, email, message, smtpHost);
+        return { ok: true, provider: "Hostinger SMTP", email, id: result.messageId, sentFolderSaved: true };
+      } catch (sentError) {
+        return {
+          ok: true,
+          provider: "Hostinger SMTP",
+          email,
+          id: result.messageId,
+          sentFolderSaved: false,
+          warning: `Message sent, but the Sent copy could not be synchronized: ${sentError instanceof Error ? sentError.message : "IMAP error"}`,
+        };
+      }
     }
     try {
       await transporter.verify();
